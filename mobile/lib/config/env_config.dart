@@ -6,7 +6,7 @@ class EnvConfig {
   }
 
   static String get backendUrl => 
-      dotenv.env['API_BASE_URL'] ?? 'http://127.0.0.1:8000';
+      dotenv.env['API_BASE_URL'] ?? 'http://localhost:8000';
   static String get mapsKey => 
       dotenv.env['GOOGLE_MAPS_KEY'] ?? '';
   static String get placesKey => 

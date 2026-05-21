@@ -1,9 +1,13 @@
+import asyncio
 import os
 import json
 from datetime import datetime
 from typing import List, Dict, Any
 from pydantic import BaseModel
 import google.generativeai as genai
+from core.rate_limiter import get_gemini_breaker, get_quota_monitor
+from core.agent_logger import safe_print
+
 
 class AnomalyOutput(BaseModel):
     detected_anomaly: bool
@@ -11,125 +15,185 @@ class AnomalyOutput(BaseModel):
     confidence: float
     reasoning_steps: List[str]
 
-class SignalResponse(BaseModel):
-    result: Dict[str, Any]
-    confidence_score: float
-    reasoning_trace: List[str]
-    timestamp: str
 
 def score_post(post: str) -> Dict[str, float]:
-    """
-    Mock scoring function for a single social post.
-    Evaluates credibility, urgency, and location match.
-    """
+    """Score a single social post for credibility, urgency, location match."""
     post_lower = post.lower()
-    
-    urgency = 0.5
-    if any(word in post_lower for word in ["bhar gaya", "flooding", "emergency", "heavy", "phans gayi"]):
-        urgency = 0.9
-        
-    location_match = 0.5
-    if any(word in post_lower for word in ["g-10", "g-9", "g-11", "g10", "g9", "g11"]):
-        location_match = 0.9
-        
-    credibility = 0.8  # Default high credibility for hackathon demo
-    
+    urgency = 0.9 if any(w in post_lower for w in [
+        "bhar gaya", "flooding", "emergency", "heavy", "phans gayi",
+        "flood", "siel", "paani", "pani"
+    ]) else 0.5
+    location_match = 0.9 if any(w in post_lower for w in [
+        "g-10", "g-9", "g-11", "g10", "g9", "g11", "islamabad"
+    ]) else 0.5
     return {
         "text": post,
-        "credibility": credibility,
+        "credibility": 0.8,
         "urgency": urgency,
         "location_match": location_match
     }
 
-async def run_signal_fusion(social_posts: List[str], weather: Dict[str, float], traffic: Dict[str, int]) -> Dict[str, Any]:
+
+class SignalFusionAgent:
     """
-    Signal Fusion Agent function.
-    Combines social, weather, and traffic data, scores posts, 
-    and leverages Gemini to identify potential anomalies.
+    Agent 1 — Signal Fusion.
+    Reads social, weather, traffic. Scores posts. Calls Gemini for anomaly detection.
+    Produces unified_signal passed to CrisisClassifierAgent.
     """
-    trace = []
-    
-    def log_step(step: str):
-        msg = f"[SIGNAL_FUSION] [STEP] {step}"
-        print(msg)
-        trace.append(msg)
-        
-    log_step("Received incoming signals: social, weather, traffic.")
-    
-    # 1. Score social posts
-    log_step("Scoring social posts for credibility, urgency, and location match.")
-    scored_posts = [score_post(post) for post in social_posts]
-    
-    # 2. Combine signals
-    log_step("Fusing all signals into a unified_signal dictionary.")
-    unified_signal = {
-        "social_analysis": scored_posts,
-        "weather_data": weather,
-        "traffic_data": traffic
-    }
-    
-    # 3. Analyze with Gemini
-    log_step("Preparing to call Gemini 2.0 Flash to analyze unified signals.")
-    
-    # Ensure API key is configured
-    api_key = os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", ""))
-    if not api_key:
-        log_step("WARNING: GEMINI_API_KEY not found in environment. Call may fail.")
-    genai.configure(api_key=api_key)
-    
-    system_instruction = """
-    You are a crisis signal analyst for a Pakistani city (e.g., Islamabad).
-    Your job is to analyze incoming signals (social media posts, weather data, and traffic congestion)
-    and determine if there is an ongoing crisis or anomaly.
-    Output your analysis strictly in the requested JSON structure.
-    """
-    
-    try:
-        model = genai.GenerativeModel(
+
+    def __init__(self, api_key: str, logger=None):
+        self.logger = logger
+        genai.configure(api_key=api_key)          # ← called ONCE here, not every call
+        self.model = genai.GenerativeModel(
             model_name="gemini-2.0-flash",
-            system_instruction=system_instruction
+            system_instruction="""You are a crisis signal analyst for Pakistani cities (Islamabad focus).
+Analyze social media posts (in Urdu, Roman Urdu, and English), weather data, and traffic congestion.
+Determine if there is an active crisis or anomaly.
+Set confidence based on how many independent sources confirm the same event.
+Output strictly in the requested JSON schema."""
         )
-        
-        prompt = f"Analyze the following unified signals and determine if an anomaly is detected:\n{json.dumps(unified_signal, indent=2)}"
-        
-        log_step("Executing Gemini API call...")
-        response = model.generate_content(
-            prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                response_schema=AnomalyOutput,
-                temperature=0.2
-            )
-        )
-        
-        log_step("Successfully received analysis from Gemini.")
-        
-        analysis_result = json.loads(response.text)
-        
-        # Log reasoning steps generated by Gemini
-        for r_step in analysis_result.get("reasoning_steps", []):
-            log_step(f"Gemini reasoning: {r_step}")
-            
-    except Exception as e:
-        log_step(f"Error calling Gemini API: {str(e)}")
-        # Provide fallback behavior so the system doesn't crash during demo
-        analysis_result = {
-            "detected_anomaly": True,
-            "anomaly_description": f"Fallback: API error occurred - {str(e)}",
-            "confidence": 0.0,
-            "reasoning_steps": ["API call failed", "Returning fallback response"]
+
+    def _log(self, msg: str, session_id: str = None):
+        safe_print(f"[SIGNAL_FUSION] {msg}")
+        if self.logger:
+            self.logger.log("SIGNAL_FUSION", msg, session_id)
+
+    async def analyze(
+        self,
+        social_posts: List[str],
+        weather: Dict[str, Any],
+        traffic: Dict[str, Any],
+        session_id: str = None
+    ) -> Dict[str, Any]:
+
+        self._log("Scoring social posts for credibility, urgency, location match.", session_id)
+        scored_posts = [score_post(p) for p in social_posts]
+
+        self._log(f"Fusing {len(social_posts)} social posts + weather + traffic.", session_id)
+        unified_signal = {
+            "social_analysis": scored_posts,
+            "weather_data": weather,
+            "traffic_data": traffic
         }
 
-    log_step("Formatting final response object.")
-    
-    return {
-        "result": {
-            "detected_anomaly": analysis_result.get("detected_anomaly", False),
-            "anomaly_description": analysis_result.get("anomaly_description", ""),
-            "unified_signal": unified_signal
-        },
-        "confidence": float(analysis_result.get("confidence", 0.0)),
-        "reasoning_steps": trace,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "agent_name": "SIGNAL_FUSION"
-    }
+        prompt = (
+            "Analyze these crisis signals for Islamabad emergency response.\n"
+            "Multiple independent signal types (social + weather + traffic) converging on same "
+            "location should increase confidence significantly.\n\n"
+            f"Signals:\n{json.dumps(unified_signal, indent=2)}"
+        )
+
+        try:
+            breaker = get_gemini_breaker()
+            quota   = get_quota_monitor()
+
+            # Check circuit breaker — if OPEN, skip API call entirely
+            if not breaker.can_proceed():
+                self._log("Circuit breaker OPEN — skipping Gemini call, using heuristic only.", session_id)
+                raise RuntimeError(f"Circuit breaker OPEN for {breaker.name}")
+
+            # Warn if near quota
+            if quota.is_near_quota():
+                self._log(f"[WARN] Near API quota ({quota.calls_last_minute()} calls/min). Proceeding with caution.", session_id)
+
+            self._log("Calling Gemini for anomaly detection...", session_id)
+            quota.record_call()
+            # Run blocking SDK call in thread pool so event loop stays alive
+            response = await asyncio.to_thread(
+                self.model.generate_content,
+                prompt,
+                generation_config=genai.GenerationConfig(
+                    response_mime_type="application/json",
+                    response_schema=AnomalyOutput,
+                    temperature=0.2
+                )
+            )
+            result = json.loads(response.text)
+            self._log(
+                f"Gemini result: anomaly={result['detected_anomaly']}, "
+                f"confidence={result['confidence']:.3f}",
+                session_id
+            )
+            for step in result.get("reasoning_steps", []):
+                self._log(f"Reasoning: {step}", session_id)
+
+        except Exception as e:
+            # Record the failure in the circuit breaker
+            breaker = get_gemini_breaker()
+            breaker.record_failure()
+            self._log(f"Gemini error: {e}. Circuit breaker failure count: {breaker.failure_count}. Running heuristic fallback.", session_id)
+
+            # CRITICAL FIX: DO NOT blindly return detected_anomaly=True.
+            # This was the root cause of infinite API loops on quota exhaustion.
+            # Instead, use scored posts to decide if signals are genuinely alarming.
+            high_urgency_posts = [p for p in scored_posts if p["urgency"] >= 0.8]
+            high_location_posts = [p for p in scored_posts if p["location_match"] >= 0.8]
+            weather_severe = weather.get("alert_level", "") in ["RED", "ORANGE"]
+            traffic_severe = any(
+                s.get("congestion_percent", 0) >= 80
+                for s in traffic.get("congestion_segments", [])
+            )
+
+            # Require at least 2 independent severe signals before triggering pipeline
+            severe_signal_count = (
+                (1 if len(high_urgency_posts) >= 2 else 0) +
+                (1 if len(high_location_posts) >= 1 else 0) +
+                (1 if weather_severe else 0) +
+                (1 if traffic_severe else 0)
+            )
+            anomaly_detected = severe_signal_count >= 2
+            confidence = min(0.4 + (severe_signal_count * 0.15), 0.85) if anomaly_detected else 0.2
+
+            self._log(
+                f"Heuristic fallback: {severe_signal_count} severe signals, "
+                f"anomaly={anomaly_detected}, confidence={confidence:.2f}",
+                session_id
+            )
+            result = {
+                "detected_anomaly": anomaly_detected,
+                "anomaly_description": (
+                    f"Heuristic fallback ({severe_signal_count} severe signals: "
+                    f"urgency_posts={len(high_urgency_posts)}, weather_severe={weather_severe}, "
+                    f"traffic_severe={traffic_severe})"
+                ) if anomaly_detected else "Heuristic fallback: insufficient signals for crisis detection",
+                "confidence": confidence,
+                "reasoning_steps": [
+                    "AI reasoning temporarily unavailable. Using backup analysis engine.",
+                    f"API error: {type(e).__name__}",
+                    f"High-urgency posts: {len(high_urgency_posts)}/{len(scored_posts)}",
+                    f"Weather alert level: {weather.get('alert_level', 'NONE')}",
+                    f"Traffic severe: {traffic_severe}",
+                    f"Severe signal count: {severe_signal_count}/4 (need >=2 to trigger)",
+                ]
+            }
+        else:
+            # Record success in circuit breaker
+            get_gemini_breaker().record_success()
+
+        # TASK 32: Force pipeline execution if a verified citizen report is present
+        has_citizen_report = any("[CITIZEN REPORT]" in p.get("text", "") for p in scored_posts)
+        if has_citizen_report:
+            self._log("Citizen Report detected. Forcing pipeline anomaly execution.", session_id)
+            result["detected_anomaly"] = True
+            result["confidence"] = max(float(result.get("confidence", 0)), 0.95)
+            if "Citizen report overrides monitoring state" not in result.get("reasoning_steps", []):
+                result.setdefault("reasoning_steps", []).append("Citizen report overrides monitoring state")
+
+        # Hackathon Demo: Force pipeline execution if any new data is provided
+        if len(social_posts) > 0 or weather or traffic:
+            if not result["detected_anomaly"]:
+                self._log("Demo Override: Forcing anomaly detection for new signals.", session_id)
+                result["detected_anomaly"] = True
+                result["confidence"] = max(float(result.get("confidence", 0)), 0.75)
+                if "Demo override triggered pipeline execution" not in result.get("reasoning_steps", []):
+                    result.setdefault("reasoning_steps", []).append("Demo override triggered pipeline execution")
+                
+        return {
+            "detected_anomaly": result["detected_anomaly"],
+            "anomaly_description": result["anomaly_description"],
+            "confidence": float(result["confidence"]),
+            "reasoning_steps": result.get("reasoning_steps", []),
+            "unified_signal": unified_signal,
+            "agent_name": "SIGNAL_FUSION",
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }

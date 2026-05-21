@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:http/http.dart' as http;
 // import 'package:audioplayers/audioplayers.dart';
 import '../config/env_config.dart';
@@ -48,7 +47,7 @@ class TTSService {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final audioContent = data['audioContent'] as String;
-        final bytes = base64Decode(audioContent);
+        final _ = base64Decode(audioContent); // audio generated but web playback disabled
         
         // final tempDir = Directory.systemTemp;
         // final file = File('${tempDir.path}/incident_alert.mp3');

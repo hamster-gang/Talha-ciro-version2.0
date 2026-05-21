@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
@@ -118,7 +119,25 @@ class _TracePanelScreenState extends State<TracePanelScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Agent Reasoning Trace'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        backgroundColor: const Color(0xFF0D1B3E),
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.copy_all_rounded),
+            tooltip: 'Export Trace',
+            onPressed: allTraces.isEmpty ? null : () {
+              final export = allTraces.join('\n');
+              Clipboard.setData(ClipboardData(text: export));
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('${allTraces.length} trace lines copied to clipboard'),
+                  backgroundColor: Colors.blueGrey.shade800,
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
+            },
+          ),
+        ],
       ),
       backgroundColor: Colors.black87,
       body: isLoading 
@@ -127,17 +146,21 @@ class _TracePanelScreenState extends State<TracePanelScreen> {
             children: [
               Container(
                 width: double.infinity,
-                padding: const EdgeInsets.all(12),
-                color: Colors.blueGrey.shade900,
+                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF1A237E), Color(0xFF311B92)],
+                  ),
+                  boxShadow: [BoxShadow(color: Colors.deepPurple.withOpacity(0.4), blurRadius: 8)],
+                ),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: const [
                     Icon(Icons.auto_awesome, color: Colors.amber, size: 16),
                     SizedBox(width: 8),
                     Text(
-                      "This decision was made autonomously",
-                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                      textAlign: TextAlign.center,
+                      '🤖  Autonomous Decision — Powered by Gemini 2.0 Flash',
+                      style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
                     ),
                   ],
                 ),
