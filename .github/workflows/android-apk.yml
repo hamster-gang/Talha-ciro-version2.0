@@ -1,0 +1,51 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Write .env
+        shell: bash
+        run: |
+          API_BASE_URL_VALUE="${API_BASE_URL:-}"
+          if [ -z "$API_BASE_URL_VALUE" ]; then
+            API_BASE_URL_VALUE="http://127.0.0.1:8000"
+          fi
+          echo "API_BASE_URL=$API_BASE_URL_VALUE" > .env
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk
