@@ -1,5 +1,6 @@
 import 'geolocation_service_stub.dart'
-    if (dart.library.html) 'geolocation_service_web.dart' as impl;
+    if (dart.library.html) 'geolocation_service_web.dart'
+    if (dart.library.io) 'geolocation_service_io.dart' as impl;
 
 class GeoPosition {
   final double latitude;

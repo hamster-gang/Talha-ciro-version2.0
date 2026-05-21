@@ -49,7 +49,7 @@ class ActionExecutorAgent:
     """
 
     # ── DEMO CONTROL: set to True to trigger failure in rescue dispatch ──
-    DEMO_FAILURE_ACTIVE = True
+    DEMO_FAILURE_ACTIVE = False
     DEMO_FAILURE_UNIT = "rescue_unit"
 
     def __init__(self, api_key: str, logger=None, memory=None):
